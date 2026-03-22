@@ -354,8 +354,9 @@ async def analyze_parallel(state: AnalysisState) -> dict:
 
     try:
         judge_2_llm = ChatOpenAI(
-            model="gpt-5.4-mini",
-            api_key=settings.openai_api_key,
+            model="doubao-seed-2-0-lite-260215",
+            api_key=settings.ark_api_key,
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
             temperature=0.3
         )
     except Exception:
@@ -382,7 +383,7 @@ async def analyze_parallel(state: AnalysisState) -> dict:
     if judge_1_llm:
         tasks.append(call_judge(judge_1_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 1 (Qwen)"))
     if judge_2_llm:
-        tasks.append(call_judge(judge_2_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 2 (OpenAI)"))
+        tasks.append(call_judge(judge_2_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 2 (Doubao)"))
     if judge_3_llm:
         tasks.append(call_judge(judge_3_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 3 (DeepSeek)"))
 

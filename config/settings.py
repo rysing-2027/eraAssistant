@@ -22,12 +22,14 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_pass: str = ""
     from_email: str = ""
+    email_cc: str = ""  # 抄送邮箱，多个用逗号分隔
 
     # AI Model API Keys
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     dashscope_api_key: str = ""  # DashScope API key for Qwen models
     deepseek_api_key: str = ""
+    ark_api_key: str = ""  # 火山方舟 API key for Doubao models
 
     # Webhook Security
     webhook_token: str = ""  # Token for Feishu automation webhook verification

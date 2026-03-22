@@ -399,7 +399,8 @@ class ReportProcessingService:
                 to_email=employee_email,
                 employee_name=employee_name,
                 email_content=email_content,
-                doc_link=feishu_doc_url
+                doc_link=feishu_doc_url,
+                cc=settings.email_cc
             )
         except Exception as e:
             with get_db() as db:

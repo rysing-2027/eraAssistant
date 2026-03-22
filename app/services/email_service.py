@@ -51,7 +51,8 @@ class EmailService:
         to_email: str,
         subject: str,
         content: str,
-        content_type: str = "html"
+        content_type: str = "html",
+        cc: str = None
     ) -> EmailResult:
         """Send an email.
 
@@ -60,6 +61,7 @@ class EmailService:
             subject: Email subject
             content: Email body content
             content_type: "html" or "plain"
+            cc: Carbon copy recipients, comma-separated
 
         Returns:
             EmailResult with success status
@@ -71,6 +73,14 @@ class EmailService:
             msg["To"] = to_email
             msg["Subject"] = subject
 
+            # Add CC if provided
+            recipients = [to_email]
+            if cc:
+                msg["Cc"] = cc
+                # Parse CC emails and add to recipients
+                cc_emails = [email.strip() for email in cc.split(",") if email.strip()]
+                recipients.extend(cc_emails)
+
             # Attach content
             mime_type = "html" if content_type == "html" else "plain"
             msg.attach(MIMEText(content, mime_type, "utf-8"))
@@ -78,7 +88,7 @@ class EmailService:
             # Connect and send (SSL for port 465)
             with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
                 server.login(self.smtp_user, self.smtp_pass)
-                server.sendmail(self.from_email, to_email, msg.as_string())
+                server.sendmail(self.from_email, recipients, msg.as_string())
 
             return EmailResult(success=True)
 
@@ -103,7 +113,8 @@ class EmailService:
         to_email: str,
         employee_name: str,
         email_content: str,
-        doc_link: str = None
+        doc_link: str = None,
+        cc: str = None
     ) -> EmailResult:
         """Send evaluation result email to employee.
 
@@ -112,6 +123,7 @@ class EmailService:
             employee_name: Employee's name
             email_content: Generated email content from AI (Markdown)
             doc_link: Optional Feishu document link to include
+            cc: Carbon copy recipients, comma-separated
 
         Returns:
             EmailResult with success status
@@ -184,5 +196,6 @@ class EmailService:
             to_email=to_email,
             subject=subject,
             content=styled_html,
-            content_type="html"
+            content_type="html",
+            cc=cc
         )
