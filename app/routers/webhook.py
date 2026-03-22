@@ -11,7 +11,10 @@ router = APIRouter(prefix="/api/webhook", tags=["webhook"])
 
 
 async def process_records_task():
-    """后台任务：完整处理流程（下载 → 解析 → 分析 → 发邮件）"""
+    """后台任务：完整处理流程（下载 → 导入 → 解析 → 分析 → 发邮件）
+
+    使用流水线模式：每条记录独立完成全部流程，不等待其他记录。
+    """
     settings = get_settings()
 
     try:
@@ -22,34 +25,24 @@ async def process_records_task():
 
         processing_service = ReportProcessingService(feishu_service=feishu_service)
 
-        # Step 1: 获取记录 + 下载 + 解析
+        # run_full_pipeline 已包含完整流程（流水线模式）
         result = await processing_service.run_full_pipeline(
             base_token=settings.feishu_base_token,
-            table_id=settings.feishu_table_id
+            table_id=settings.feishu_table_id,
+            folder_token=settings.feishu_folder_token
         )
 
-        record_ids = result.get("record_ids", [])
-        if not record_ids:
-            print("📭 No records to process")
-            return
-
-        print(f"📬 Processing {len(record_ids)} record(s) in background...")
-
-        # Step 2: 并行分析 + 发邮件 (最多3个并发)
-        semaphore = asyncio.Semaphore(3)
-
-        async def process_one(record_id: int):
-            async with semaphore:
-                success = await processing_service.run_analysis_for_record(record_id)
-                if success:
-                    await processing_service.send_email_for_record(record_id)
-                return success
-
-        results = await asyncio.gather(*[process_one(rid) for rid in record_ids])
-        print(f"✅ Background task complete: {sum(results)}/{len(record_ids)} successful")
+        new_count = result.get("new_records", 0)
+        success_count = result.get("success", 0)
+        if new_count > 0:
+            print(f"✅ Background task complete: {success_count}/{new_count} successful")
+        else:
+            print("📭 No new records to process")
 
     except Exception as e:
+        import traceback
         print(f"❌ Background task failed: {e}")
+        traceback.print_exc()
 
 
 @router.post("/trigger")

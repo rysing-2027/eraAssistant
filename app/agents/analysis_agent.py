@@ -34,6 +34,31 @@ if _settings.langsmith_api_key:
 
 
 # ============================================================================
+# Rate Limiting for ChatTongyi (通义千问限制 5次/秒)
+# ============================================================================
+
+_tongyi_semaphore = asyncio.Semaphore(3)  # 同时最多 3 个请求
+_tongyi_last_call_time = 0
+_tongyi_lock = asyncio.Lock()
+
+
+async def call_tongyi_with_rate_limit(llm, messages) -> Any:
+    """调用 ChatTongyi 并遵守限流规则（5次/秒）。"""
+    global _tongyi_last_call_time
+
+    async with _tongyi_semaphore:
+        async with _tongyi_lock:
+            # 确保距离上次调用至少 0.2 秒
+            now = asyncio.get_event_loop().time()
+            elapsed = now - _tongyi_last_call_time
+            if elapsed < 0.2:
+                await asyncio.sleep(0.2 - elapsed)
+            _tongyi_last_call_time = asyncio.get_event_loop().time()
+
+        return await llm.ainvoke(messages)
+
+
+# ============================================================================
 # State Definition
 # ============================================================================
 
@@ -273,7 +298,12 @@ async def call_judge(
             HumanMessage(content=f"## 员工姓名\n{employee_name}\n\n## 报告内容\n{raw_text}")
         ]
 
-        response = await llm.ainvoke(messages)
+        # ChatTongyi 需要限流
+        if "Qwen" in judge_name or "Tongyi" in judge_name:
+            response = await call_tongyi_with_rate_limit(llm, messages)
+        else:
+            response = await llm.ainvoke(messages)
+
         content = response.content
 
         # Parse JSON response
@@ -303,17 +333,22 @@ async def call_judge(
         }
 
 
+def create_tongyi_llm(settings) -> Any:
+    """创建 ChatTongyi LLM。"""
+    return ChatTongyi(
+        model="qwen3-max",
+        dashscope_api_key=settings.dashscope_api_key,
+        temperature=0.3
+    )
+
+
 async def analyze_parallel(state: AnalysisState) -> dict:
     """Call 3 judges in parallel."""
     settings = get_settings()
 
     # Initialize LLMs
     try:
-        judge_1_llm = ChatTongyi(
-            model="qwen3-max",
-            dashscope_api_key=settings.dashscope_api_key,
-            temperature=0.3
-        )
+        judge_1_llm = create_tongyi_llm(settings)
     except Exception:
         judge_1_llm = None
 
@@ -328,7 +363,7 @@ async def analyze_parallel(state: AnalysisState) -> dict:
 
     try:
         judge_3_llm = ChatOpenAI(
-            model="deepseek-chat",
+            model="deepseek-reasoner",
             api_key=settings.deepseek_api_key,
             base_url="https://api.deepseek.com/v1",
             temperature=0.3
@@ -373,11 +408,7 @@ async def main_judge(state: AnalysisState) -> dict:
     """Main judge consolidates results and generates final output."""
     settings = get_settings()
 
-    main_llm = ChatTongyi(
-        model="qwen3-max",
-        dashscope_api_key=settings.dashscope_api_key,
-        temperature=0.3
-    )
+    main_llm = create_tongyi_llm(settings)
 
     # Gather judge results
     judge_results = []
@@ -412,7 +443,8 @@ async def main_judge(state: AnalysisState) -> dict:
             HumanMessage(content=user_message)
         ]
 
-        response = await main_llm.ainvoke(messages)
+        # Main Judge 也用 ChatTongyi，需要限流
+        response = await call_tongyi_with_rate_limit(main_llm, messages)
         content = response.content
 
         if "```json" in content:

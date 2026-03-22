@@ -37,6 +37,12 @@ class Record(Base):
     file_token = Column(String(200), nullable=False)  # Feishu file token for download
     file_name = Column(String(500))
 
+    # 预设的飞书表格链接（可选，如有则跳过导入）
+    report_link = Column(String(500), nullable=True)
+
+    # Feishu document link (after upload to Drive)
+    feishu_doc_url = Column(String(500), nullable=True)
+
     # Status tracking
     status = Column(
         Enum(RecordStatus, values_callable=lambda x: [e.value for e in x]),

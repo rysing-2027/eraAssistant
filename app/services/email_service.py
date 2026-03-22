@@ -102,7 +102,8 @@ class EmailService:
         self,
         to_email: str,
         employee_name: str,
-        email_content: str
+        email_content: str,
+        doc_link: str = None
     ) -> EmailResult:
         """Send evaluation result email to employee.
 
@@ -110,6 +111,7 @@ class EmailService:
             to_email: Employee's email address
             employee_name: Employee's name
             email_content: Generated email content from AI (Markdown)
+            doc_link: Optional Feishu document link to include
 
         Returns:
             EmailResult with success status
@@ -121,6 +123,18 @@ class EmailService:
             email_content,
             extensions=["tables", "fenced_code"]
         )
+
+        # Add document link section if provided
+        doc_link_html = ""
+        if doc_link:
+            doc_link_html = f"""
+            <div style="margin-top: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;">
+                <p style="margin: 0; color: #2c3e50; font-weight: 500;">📎 原始报告文件：</p>
+                <p style="margin: 10px 0 0 0;">
+                    <a href="{doc_link}" style="color: #3498db; text-decoration: none;">点击查看飞书文档 →</a>
+                </p>
+            </div>
+            """
 
         # Wrap with basic styling
         styled_html = f"""
@@ -161,6 +175,7 @@ class EmailService:
         </head>
         <body>
             {html_content}
+            {doc_link_html}
         </body>
         </html>
         """

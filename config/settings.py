@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     feishu_app_secret: str = ""
     feishu_base_token: str = ""
     feishu_table_id: str = ""
+    feishu_folder_token: str = ""  # Target folder for uploading xlsx files
 
     # Email (SMTP)
     smtp_host: str = "smtp.gmail.com"
