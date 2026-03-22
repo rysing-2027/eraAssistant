@@ -1,4 +1,9 @@
 """ERA Assistant - FastAPI Application Entry Point."""
+import os
+
+# Bypass proxy for Alibaba Cloud APIs (DashScope, OSS, etc.)
+os.environ['NO_PROXY'] = 'aliyuncs.com,aliyun.com'
+
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
