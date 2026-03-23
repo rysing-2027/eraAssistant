@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/agents/analysis_agent.py
+# hypothesis_version: 6.141.1
+
+[0.2, 0.3, 'Judge 1', 'Judge 1 (Qwen)', 'Judge 2', 'Judge 2 (Doubao)', 'Judge 3', 'Judge 3 (DeepSeek)', 'LANGSMITH_API_KEY', 'LANGSMITH_ENDPOINT', 'LANGSMITH_PROJECT', 'LANGSMITH_TRACING', 'Qwen', 'Tongyi', '```', '```json', 'analyze_parallel', 'content', 'deepseek-reasoner', 'email_content', 'email_template', 'employee_name', 'enable_thinking', 'error', 'evaluation_criteria', 'final_score', 'glm-5', 'judge', 'judge_1_result', 'judge_2_result', 'judge_3_result', 'knowledge_content', 'load_context', 'main_judge', 'qwen3.5-plus', 'raw_response', 'raw_text', 'record_id', 'save_results', 'success', 'true', '暂无产品知识库内容', '暂无评估标准内容', '暂无邮件模板']

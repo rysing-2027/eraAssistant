@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/services/feishu_service.py
+# hypothesis_version: 6.141.1
+
+[10.0, 30.0, 60.0, 120.0, 100, 200, 500, '.xlsx', 'Authorization', 'Content-Type', 'FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'No error details', 'POST', 'PUT', 'Submitted', 'and', 'app_id', 'app_secret', 'application/json', 'ccm_import_open', 'code', 'conditions', 'conjunction', 'data', 'extra', 'field_name', 'fields', 'file', 'file_extension', 'file_name', 'file_token', 'filter', 'headers', 'is', 'items', 'job_error_msg', 'job_status', 'mount_key', 'mount_type', 'obj_type', 'operator', 'page_size', 'parent_type', 'point', 'result', 'sheet', 'size', 'status', 'success', 'tenant_access_token', 'ticket', 'token', 'type', 'url', 'value', 'xlsx']

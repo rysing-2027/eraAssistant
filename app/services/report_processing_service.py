@@ -56,7 +56,10 @@ class ReportProcessingService:
         self.feishu_service = feishu_service
         self.excel_service = ExcelProcessingService()
         self.max_concurrent = max_concurrent
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        # 按阶段分别限流，让不同阶段的记录可以并行推进
+        self._download_semaphore = asyncio.Semaphore(max_concurrent)      # 下载+导入+解析
+        self._analysis_semaphore = asyncio.Semaphore(5)                   # AI 分析（放宽，由 provider limiter 控制实际并发）
+        self._email_semaphore = asyncio.Semaphore(max_concurrent)         # 发邮件
 
     # =========================================================================
     # 核心处理函数（可复用）
@@ -71,7 +74,7 @@ class ReportProcessingService:
         if not self.feishu_service:
             return {"filename": filename, "file_content": None, "error": "FeishuService not configured"}
 
-        async with self._semaphore:
+        async with self._download_semaphore:
             try:
                 await asyncio.sleep(0.5)  # 避免 Feishu 限流
                 content = await self.feishu_service.download_file(file_token)
@@ -269,6 +272,7 @@ class ReportProcessingService:
         """处理单条记录的完整流程：下载 → 导入 → 解析 → 分析 → 发邮件。
 
         流水线模式：每条记录独立完成全部流程，不等待其他记录。
+        各阶段通过独立的 semaphore 控制并发，允许不同阶段的记录并行推进。
 
         Args:
             record_id: 记录 ID
@@ -278,12 +282,12 @@ class ReportProcessingService:
             True 表示成功（状态变为 DONE）
             False 表示失败（状态变为 FAILED）
         """
-        # Step 1: 下载 → 导入 → 解析
+        # Step 1: 下载 → 导入 → 解析（受 _download_semaphore 控制）
         process_success = await self.process_single_record(record_id, folder_token)
         if not process_success:
             return False
 
-        # Step 2: 分析 → 发邮件
+        # Step 2: 分析 → 发邮件（受 _analysis_semaphore / _email_semaphore 控制）
         return await self.analyze_and_email(record_id)
 
     async def _run_analysis_for_record(self, record_id: int) -> bool:
@@ -294,140 +298,145 @@ class ReportProcessingService:
             log_step("Analysis", f"Record {record_id} is already being processed, skipping", "⏭️")
             return False
 
-        async with lock:
+        async with self._analysis_semaphore:
+            async with lock:
+                settings = get_settings()
+                agent = get_analysis_agent()
+
+                with get_db() as db:
+                    record = db.query(Record).filter(
+                        Record.id == record_id,
+                        Record.status == RecordStatus.READY_FOR_ANALYSIS
+                    ).first()
+
+                    if not record:
+                        log_step("Analysis", f"Record {record_id} not found or not ready", "⚠️")
+                        return False
+
+                    employee_name = record.employee_name
+                    raw_text = record.raw_text or ""
+                    rec_id = record.id
+
+                    record.status = RecordStatus.ANALYZING
+                    db.commit()
+
+                # 执行分析（在 session 外）
+                try:
+                    result = await agent.analyze(
+                        record_id=rec_id,
+                        employee_name=employee_name,
+                        raw_text=raw_text
+                    )
+                except Exception as e:
+                    with get_db() as db:
+                        record = db.query(Record).filter(Record.id == rec_id).first()
+                        if record:
+                            record.status = RecordStatus.FAILED
+                            record.error_message = f"Analysis exception: {str(e)}"
+                            db.commit()
+                    log_step("Analysis error", f"{employee_name}: {str(e)}", "❌")
+                    return False
+
+                # 更新结果
+                with get_db() as db:
+                    record = db.query(Record).filter(Record.id == rec_id).first()
+                    if not record:
+                        return False
+
+                    if result.get("error"):
+                        record.status = RecordStatus.FAILED
+                        record.error_message = result["error"]
+                        db.commit()
+                        log_step("Analysis failed", f"{employee_name}: {result['error']}", "❌")
+                        return False
+
+                    log_step("Analyzed", f"{employee_name} - Score: {result.get('final_score', {}).get('总分', 'N/A')}", "✅")
+                    db.commit()
+                    return True
+
+    async def _send_email_for_record(self, record_id: int) -> bool:
+        """发送评估邮件（内部函数）。"""
+        async with self._email_semaphore:
             settings = get_settings()
-            agent = get_analysis_agent()
+
+            if not settings.smtp_user or not settings.smtp_pass:
+                log_step("Email", "SMTP not configured", "⚠️")
+                return False
+
+            email_service = EmailService(
+                smtp_host=settings.smtp_host,
+                smtp_port=settings.smtp_port,
+                smtp_user=settings.smtp_user,
+                smtp_pass=settings.smtp_pass,
+                from_email=settings.from_email,
+                from_name=settings.from_name
+            )
 
             with get_db() as db:
                 record = db.query(Record).filter(
                     Record.id == record_id,
-                    Record.status == RecordStatus.READY_FOR_ANALYSIS
+                    Record.status == RecordStatus.SCORED
                 ).first()
 
                 if not record:
-                    log_step("Analysis", f"Record {record_id} not found or not ready", "⚠️")
+                    log_step("Email", f"Record {record_id} not found or not scored", "⚠️")
                     return False
 
+                employee_email = record.employee_email
                 employee_name = record.employee_name
-                raw_text = record.raw_text or ""
+                email_content = record.email_content
+                feishu_doc_url = record.feishu_doc_url
+                view_token = record.view_token
                 rec_id = record.id
 
-                record.status = RecordStatus.ANALYZING
+                record.status = RecordStatus.EMAILING
                 db.commit()
 
-            # 执行分析（在 session 外）
+            if not email_content:
+                with get_db() as db:
+                    record = db.query(Record).filter(Record.id == rec_id).first()
+                    if record:
+                        record.status = RecordStatus.FAILED
+                        record.error_message = "No email content generated"
+                        db.commit()
+                log_step("Email error", f"{employee_name}: No email content", "❌")
+                return False
+
             try:
-                result = await agent.analyze(
-                    record_id=rec_id,
+                result = email_service.send_evaluation_email(
+                    to_email=employee_email,
                     employee_name=employee_name,
-                    raw_text=raw_text
+                    email_content=email_content,
+                    doc_link=feishu_doc_url,
+                    cc=settings.email_cc,
+                    view_token=view_token
                 )
             except Exception as e:
                 with get_db() as db:
                     record = db.query(Record).filter(Record.id == rec_id).first()
                     if record:
                         record.status = RecordStatus.FAILED
-                        record.error_message = f"Analysis exception: {str(e)}"
+                        record.error_message = f"Email exception: {str(e)}"
                         db.commit()
-                log_step("Analysis error", f"{employee_name}: {str(e)}", "❌")
+                log_step("Email error", f"{employee_name}: {str(e)}", "❌")
                 return False
 
-            # 更新结果
             with get_db() as db:
                 record = db.query(Record).filter(Record.id == rec_id).first()
                 if not record:
                     return False
 
-                if result.get("error"):
-                    record.status = RecordStatus.FAILED
-                    record.error_message = result["error"]
+                if result.success:
+                    record.status = RecordStatus.DONE
+                    record.email_sent_at = datetime.now()
                     db.commit()
-                    log_step("Analysis failed", f"{employee_name}: {result['error']}", "❌")
-                    return False
-
-                log_step("Analyzed", f"{employee_name} - Score: {result.get('final_score', {}).get('总分', 'N/A')}", "✅")
-                db.commit()
-                return True
-
-    async def _send_email_for_record(self, record_id: int) -> bool:
-        """发送评估邮件（内部函数）。"""
-        settings = get_settings()
-
-        if not settings.smtp_user or not settings.smtp_pass:
-            log_step("Email", "SMTP not configured", "⚠️")
-            return False
-
-        email_service = EmailService(
-            smtp_host=settings.smtp_host,
-            smtp_port=settings.smtp_port,
-            smtp_user=settings.smtp_user,
-            smtp_pass=settings.smtp_pass,
-            from_email=settings.from_email
-        )
-
-        with get_db() as db:
-            record = db.query(Record).filter(
-                Record.id == record_id,
-                Record.status == RecordStatus.SCORED
-            ).first()
-
-            if not record:
-                log_step("Email", f"Record {record_id} not found or not scored", "⚠️")
-                return False
-
-            employee_email = record.employee_email
-            employee_name = record.employee_name
-            email_content = record.email_content
-            feishu_doc_url = record.feishu_doc_url
-            rec_id = record.id
-
-            record.status = RecordStatus.EMAILING
-            db.commit()
-
-        if not email_content:
-            with get_db() as db:
-                record = db.query(Record).filter(Record.id == rec_id).first()
-                if record:
+                    log_step("Email sent", f"{employee_name} <{employee_email}>", "✅")
+                    return True
+                else:
                     record.status = RecordStatus.FAILED
-                    record.error_message = "No email content generated"
+                    record.error_message = result.error_message
                     db.commit()
-            log_step("Email error", f"{employee_name}: No email content", "❌")
-            return False
-
-        try:
-            result = email_service.send_evaluation_email(
-                to_email=employee_email,
-                employee_name=employee_name,
-                email_content=email_content,
-                doc_link=feishu_doc_url,
-                cc=settings.email_cc
-            )
-        except Exception as e:
-            with get_db() as db:
-                record = db.query(Record).filter(Record.id == rec_id).first()
-                if record:
-                    record.status = RecordStatus.FAILED
-                    record.error_message = f"Email exception: {str(e)}"
-                    db.commit()
-            log_step("Email error", f"{employee_name}: {str(e)}", "❌")
-            return False
-
-        with get_db() as db:
-            record = db.query(Record).filter(Record.id == rec_id).first()
-            if not record:
-                return False
-
-            if result.success:
-                record.status = RecordStatus.DONE
-                record.email_sent_at = datetime.now()
-                db.commit()
-                log_step("Email sent", f"{employee_name} <{employee_email}>", "✅")
-                return True
-            else:
-                record.status = RecordStatus.FAILED
-                record.error_message = result.error_message
-                db.commit()
-                log_step("Email failed", f"{employee_name}: {result.error_message}", "❌")
+                    log_step("Email failed", f"{employee_name}: {result.error_message}", "❌")
                 return False
 
     # =========================================================================
@@ -831,3 +840,29 @@ class ReportProcessingService:
     async def send_email_for_record(self, record_id: int) -> bool:
         """兼容旧 API：发送单条记录邮件。"""
         return await self._send_email_for_record(record_id)
+
+
+# ============================================================================
+# 单例：全局共享同一个 ReportProcessingService 实例
+# ============================================================================
+
+_processing_service: Optional[ReportProcessingService] = None
+
+
+def get_processing_service() -> ReportProcessingService:
+    """获取全局唯一的 ReportProcessingService 实例。
+
+    首次调用时自动创建（带 FeishuService），后续调用返回同一个实例。
+    所有 semaphore 和限流状态在整个应用生命周期内共享。
+    """
+    global _processing_service
+    if _processing_service is None:
+        settings = get_settings()
+        feishu_service = None
+        if settings.feishu_app_id and settings.feishu_app_secret:
+            feishu_service = FeishuService(
+                app_id=settings.feishu_app_id,
+                app_secret=settings.feishu_app_secret
+            )
+        _processing_service = ReportProcessingService(feishu_service=feishu_service)
+    return _processing_service

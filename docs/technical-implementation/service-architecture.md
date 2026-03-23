@@ -531,112 +531,83 @@ class RecordStatus(str, enum.Enum):
 
 ### Overview
 
-系统在多个层级实现了并发控制，避免触发外部 API 限流：
+系统采用两层并发控制，简洁有效地避免外部 API 限流：
 
 ```
-Layer 1: Webhook/Startup     → Semaphore(3)   控制记录级处理并发
+Layer 1: Stage Semaphores     → 每个阶段独立 Semaphore(3)
+         download_semaphore   → 下载+导入+解析
+         analysis_semaphore   → AI 分析
+         email_semaphore      → 发邮件
     ↓
-Layer 2: Download            → Semaphore(3)   控制飞书文件下载并发
-    ↓
-Layer 3: Analysis            → Semaphore(3)   控制 AI 分析并发
-    ↓
-Layer 4: ChatTongyi API      → Semaphore(3)   控制通义千问 API 并发
-         + Rate Limit        → 0.2s 间隔      保证不超过 5次/秒
+Layer 2: Per-Provider Limiter → 每个 AI API 独立限流（Semaphore + QPS 间隔）
 ```
 
-### 为什么需要多层并发控制？
+### 为什么这样设计？
+
+按阶段分别限流，不同阶段的记录可以并行推进。比如 3 条在做 AI 分析的同时，
+另外 3 条可以在下载文件。Webhook 新来的记录也不会被正在分析的记录阻塞。
 
 | API | 限制 | 应对策略 |
 |-----|------|---------|
-| 飞书文件下载 | 未知，保守限制 | Semaphore(3) |
-| 通义千问 (ChatTongyi) | 5 次/秒 | Semaphore(3) + 0.2s 间隔 |
-| OpenAI | 按账户配额 | Semaphore(3) 足够 |
-| DeepSeek | 按账户配额 | Semaphore(3) 足够 |
+| 飞书文件下载 | 未知，保守限制 | Pipeline Semaphore(3) + 0.5s sleep |
+| DashScope (通义千问 + Kimi K2) | 5 次/秒 | Semaphore(3) + 0.2s 间隔 |
+| 火山方舟 (Doubao) | 按账户配额 | Semaphore(3) + 0.3s 间隔 |
+| DeepSeek | 按账户配额 | Semaphore(3) + 0.3s 间隔 |
 
-### Layer 1: Record Processing
-
-**位置**: `main.py`, `webhook.py`, `report_processing_service.py`
-
-```python
-semaphore = asyncio.Semaphore(3)
-
-async def process_one(record_id: int):
-    async with semaphore:
-        success = await run_analysis_for_record(record_id)
-        if success:
-            await send_email_for_record(record_id)
-
-# 并行处理多条记录
-await asyncio.gather(*[process_one(rid) for rid in record_ids])
-```
-
-**效果**: 最多 3 条记录同时处理
-
-### Layer 2: File Download
+### Layer 1: Stage Semaphores
 
 **位置**: `app/services/report_processing_service.py`
 
-```python
-class ReportProcessingService:
-    def __init__(self, max_concurrent: int = 3):
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def _download_file(self, file_token: str, filename: str):
-        async with self._semaphore:
-            await asyncio.sleep(0.5)  # 避免飞书限流
-            content = await self.feishu_service.download_file(file_token)
-            return {"file_content": content, "filename": filename}
-```
-
-**效果**: 最多 3 个文件同时下载
-
-### Layer 3: Analysis Tasks
-
-**位置**: `app/services/report_processing_service.py`
+每个阶段有独立的 semaphore，记录在各阶段之间自由流转：
 
 ```python
-# 处理恢复记录时的并发控制
-async def process_stuck_records(...):
-    # FAILED 记录
-    ready_ids = [...]
-    semaphore = asyncio.Semaphore(3)
-
-    async def process_failed(record_id):
-        async with semaphore:
-            success = await self.analyze_and_email(record_id)
-            return success
-
-    await asyncio.gather(*[process_failed(rid) for rid in ready_ids])
+def __init__(self, max_concurrent=3):
+    self._download_semaphore = asyncio.Semaphore(max_concurrent)   # 下载+导入+解析
+    self._analysis_semaphore = asyncio.Semaphore(max_concurrent)   # AI 分析
+    self._email_semaphore = asyncio.Semaphore(max_concurrent)      # 发邮件
 ```
 
-**效果**: 最多 3 个分析任务并行执行
+`process_record_complete` 不再持有全局锁，每条记录独立走完整流程，
+各阶段内部自行排队：
 
-### Layer 4: ChatTongyi Rate Limiting
+```python
+async def process_record_complete(self, record_id, folder_token=None):
+    # 下载阶段：受 _download_semaphore 控制
+    process_success = await self.process_single_record(record_id, folder_token)
+    if not process_success:
+        return False
+    # 分析+邮件阶段：受 _analysis_semaphore / _email_semaphore 控制
+    return await self.analyze_and_email(record_id)
+```
+
+**效果**: 20 条记录同时启动，最多 3 条同时下载、3 条同时分析、3 条同时发邮件，互不阻塞。
+
+### Layer 2: Per-Provider Rate Limiter
 
 **位置**: `app/agents/analysis_agent.py`
 
-通义千问 API 限制每秒 5 次调用，需要特殊处理：
+每个 AI API provider 有独立的 `RateLimiter` 实例，控制并发数和 QPS：
 
 ```python
-# 全局限流控制
-_tongyi_semaphore = asyncio.Semaphore(3)  # 最多 3 个并发请求
-_tongyi_last_call_time = 0                # 上次调用时间
-_tongyi_lock = asyncio.Lock()             # 时间锁
+class RateLimiter:
+    def __init__(self, name, max_concurrent=3, min_interval=0.2):
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._min_interval = min_interval
+        ...
 
-async def call_tongyi_with_rate_limit(llm, messages):
-    """调用 ChatTongyi 并遵守限流规则（5次/秒）"""
-    global _tongyi_last_call_time
+# 各 provider 限流配置
+_dashscope_limiter = RateLimiter("dashscope", max_concurrent=3, min_interval=0.2)
+_ark_limiter = RateLimiter("ark", max_concurrent=3, min_interval=0.3)
+_deepseek_limiter = RateLimiter("deepseek", max_concurrent=3, min_interval=0.3)
+```
 
-    async with _tongyi_semaphore:
-        # 确保请求间隔至少 0.2 秒
-        async with _tongyi_lock:
-            now = asyncio.get_event_loop().time()
-            elapsed = now - _tongyi_last_call_time
-            if elapsed < 0.2:
-                await asyncio.sleep(0.2 - elapsed)
-            _tongyi_last_call_time = asyncio.get_event_loop().time()
+`call_judge` 通过 `provider` 参数自动路由到对应的限流器，不再需要 if/else 判断：
 
-        return await llm.ainvoke(messages)
+```python
+async def call_judge(llm, system_prompt, raw_text, employee_name, judge_name, provider="dashscope"):
+    response = await asyncio.wait_for(
+        call_with_rate_limit(provider, llm, messages), timeout=300
+    )
 ```
 
 **调用点**:

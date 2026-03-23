@@ -4,8 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Header, BackgroundTasks
 
 from config.settings import get_settings
-from app.services.feishu_service import FeishuService
-from app.services.report_processing_service import ReportProcessingService
+from app.services.report_processing_service import get_processing_service
 
 router = APIRouter(prefix="/api/webhook", tags=["webhook"])
 
@@ -18,12 +17,7 @@ async def process_records_task():
     settings = get_settings()
 
     try:
-        feishu_service = FeishuService(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret
-        )
-
-        processing_service = ReportProcessingService(feishu_service=feishu_service)
+        processing_service = get_processing_service()
 
         # run_full_pipeline 已包含完整流程（流水线模式）
         result = await processing_service.run_full_pipeline(

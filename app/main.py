@@ -13,13 +13,13 @@ from pathlib import Path
 
 from app.utils.database import init_db
 from config.settings import get_settings
-from app.services.feishu_service import FeishuService
-from app.services.report_processing_service import ReportProcessingService
-from app.routers import health_router, test_router, webhook_router, admin_router
+from app.services.report_processing_service import get_processing_service
+from app.routers import health_router, test_router, webhook_router, admin_router, report_router
 
 # Get project root directory
 PROJECT_ROOT = Path(__file__).parent.parent
 ADMIN_DIST = PROJECT_ROOT / "admin" / "dist"
+VIEWER_DIST = PROJECT_ROOT / "viewer" / "dist"
 
 
 @asynccontextmanager
@@ -37,11 +37,7 @@ async def lifespan(app: FastAPI):
 
     # Recover and process stuck records from previous crash
     if settings.feishu_app_id and settings.feishu_app_secret:
-        feishu_service = FeishuService(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret
-        )
-        processing_service = ReportProcessingService(feishu_service=feishu_service)
+        processing_service = get_processing_service()
 
         # Step 1: Recover stuck records (reset transient states)
         recovery_result = processing_service.recover_stuck_records()
@@ -121,6 +117,14 @@ app.include_router(health_router)
 app.include_router(test_router)
 app.include_router(webhook_router)
 app.include_router(admin_router)
+app.include_router(report_router)
+
+
+# Landing page - ASCII art animation
+@app.get("/", response_class=FileResponse)
+async def serve_landing():
+    """Serve ASCII art landing page."""
+    return FileResponse(PROJECT_ROOT / "static" / "landing.html")
 
 
 # Admin SPA - serve built React app
@@ -141,6 +145,22 @@ async def serve_admin_spa():
 admin_assets = ADMIN_DIST / "assets"
 if admin_assets.exists():
     app.mount("/assets", StaticFiles(directory=admin_assets), name="admin-assets")
+
+
+# Viewer SPA - serve built React app for report viewing
+@app.get("/report/{view_token}", response_class=FileResponse)
+async def serve_viewer_spa(view_token: str):
+    """Serve viewer SPA for client-side routing."""
+    index_file = VIEWER_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return FileResponse(PROJECT_ROOT / "static" / "admin-not-built.html")
+
+
+# Mount viewer static assets if built
+viewer_assets = VIEWER_DIST / "viewer-assets"
+if viewer_assets.exists():
+    app.mount("/viewer-assets", StaticFiles(directory=viewer_assets), name="viewer-assets")
 
 
 if __name__ == "__main__":

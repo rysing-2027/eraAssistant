@@ -1,4 +1,5 @@
 """Database models for ERA Assistant."""
+import uuid
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, JSON, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
@@ -25,6 +26,9 @@ class Record(Base):
     __tablename__ = "records"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # Public access token (UUID4) for report viewer links
+    view_token = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid.uuid4()))
 
     # Feishu Base reference
     feishu_record_id = Column(String(100), unique=True, index=True, nullable=False)

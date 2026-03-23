@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/routers/report.py
+# hypothesis_version: 6.141.1
+
+[404, 'Report not found', 'analysis_results', 'created_at', 'email_content', 'employee_email', 'employee_name', 'error_message', 'feishu_doc_url', 'final_score', 'raw_text', 'report', 'success']

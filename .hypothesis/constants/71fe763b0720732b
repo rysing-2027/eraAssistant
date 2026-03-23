@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/routers/admin.py
+# hypothesis_version: 6.141.1
+
+[401, 404, 500, 86400, '/api/admin', '/email-templates', '/evaluation-criteria', '/login', '/logout', '/me', '/product-knowledge', '/records', '/records/{record_id}', 'Admin not configured', 'Invalid credentials', 'Not authenticated', 'Not found', 'Record not found', 'Session expired', 'admin', 'admin_session', 'analysis_results', 'content', 'created', 'created_at', 'deleted', 'description', 'email_content', 'email_sent_at', 'employee_email', 'employee_name', 'error_message', 'expires_at', 'feishu_record_id', 'file_name', 'final_score', 'id', 'is_active', 'lax', 'name', 'page', 'page_size', 'product_line', 'raw_text', 'records', 'retry_count', 'section_name', 'sort_order', 'status', 'success', 'title', 'total', 'updated', 'updated_at', 'username']

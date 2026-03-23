@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from config.settings import get_settings
 from app.services.feishu_service import FeishuService
-from app.services.report_processing_service import ReportProcessingService
+from app.services.report_processing_service import get_processing_service
 from app.agents.analysis_agent import get_analysis_agent
 from app.models.record import Record, RecordStatus
 from app.utils.database import get_db
@@ -61,12 +61,7 @@ async def test_full_pipeline():
         raise HTTPException(status_code=400, detail="Feishu credentials not configured")
 
     try:
-        feishu_service = FeishuService(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret
-        )
-
-        processing_service = ReportProcessingService(feishu_service=feishu_service)
+        processing_service = get_processing_service()
 
         result = await processing_service.run_full_pipeline(
             base_token=settings.feishu_base_token,
@@ -93,12 +88,7 @@ async def retry_failed_records():
         raise HTTPException(status_code=400, detail="Feishu credentials not configured")
 
     try:
-        feishu_service = FeishuService(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret
-        )
-
-        processing_service = ReportProcessingService(feishu_service=feishu_service)
+        processing_service = get_processing_service()
 
         result = await processing_service.retry_failed_records()
 
@@ -176,12 +166,7 @@ async def test_complete_workflow():
         raise HTTPException(status_code=400, detail="Feishu credentials not configured")
 
     try:
-        feishu_service = FeishuService(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret
-        )
-
-        processing_service = ReportProcessingService(feishu_service=feishu_service)
+        processing_service = get_processing_service()
 
         # Step 1: Fetch and parse (sync)
         pipeline_result = await processing_service.run_full_pipeline(
@@ -197,25 +182,21 @@ async def test_complete_workflow():
                 "message": "No new records to process"
             }
 
-        # Step 2: Parallel analysis + email (max 3 concurrent)
-        semaphore = asyncio.Semaphore(3)
+        # Step 2: analysis + email（并发由 service 内部 semaphore 控制）
+        results = await asyncio.gather(
+            *[processing_service.analyze_and_email(rid) for rid in record_ids],
+            return_exceptions=True
+        )
 
-        async def process_one(record_id: int):
-            async with semaphore:
-                success = await processing_service.run_analysis_for_record(record_id)
-                if success:
-                    await processing_service.send_email_for_record(record_id)
-                return success
-
-        results = await asyncio.gather(*[process_one(rid) for rid in record_ids])
+        success_count = sum(1 for r in results if r is True)
 
         return {
             "status": "success",
             "pipeline": pipeline_result,
             "analysis": {
                 "total": len(record_ids),
-                "success": sum(results),
-                "failed": len(record_ids) - sum(results)
+                "success": success_count,
+                "failed": len(record_ids) - success_count
             }
         }
 
@@ -233,7 +214,7 @@ async def continue_stalled_workflow():
     """
     import asyncio
 
-    processing_service = ReportProcessingService(feishu_service=None)
+    processing_service = get_processing_service()
 
     with get_db() as db:
         records = db.query(Record).filter(
@@ -249,21 +230,17 @@ async def continue_stalled_workflow():
 
         record_ids = [r.id for r in records]
 
-    # 并行处理，最多3个
-    semaphore = asyncio.Semaphore(3)
+    # 并发由 service 内部 semaphore 控制
+    results = await asyncio.gather(
+        *[processing_service.analyze_and_email(rid) for rid in record_ids],
+        return_exceptions=True
+    )
 
-    async def process_one(record_id: int):
-        async with semaphore:
-            success = await processing_service.run_analysis_for_record(record_id)
-            if success:
-                await processing_service.send_email_for_record(record_id)
-            return success
-
-    results = await asyncio.gather(*[process_one(rid) for rid in record_ids])
+    success_count = sum(1 for r in results if r is True)
 
     return {
         "status": "success",
         "total_records": len(record_ids),
-        "analysis_success": sum(results),
-        "failed": len(record_ids) - sum(results)
+        "analysis_success": success_count,
+        "failed": len(record_ids) - success_count
     }

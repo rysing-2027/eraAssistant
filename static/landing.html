@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ERA · AI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;overflow:hidden;font-family:'Courier New',monospace}
+canvas{display:block;position:fixed;top:0;left:0;z-index:0}
+.overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.logo{font-size:clamp(48px,10vw,96px);font-weight:900;color:#fff;letter-spacing:12px;text-shadow:0 0 40px rgba(79,70,229,0.6),0 0 80px rgba(79,70,229,0.3);animation:pulse 3s ease-in-out infinite}
+.sub{margin-top:12px;font-size:clamp(11px,1.5vw,14px);color:rgba(255,255,255,0.35);letter-spacing:6px;text-transform:uppercase}
+@keyframes pulse{0%,100%{opacity:1;text-shadow:0 0 40px rgba(79,70,229,0.6),0 0 80px rgba(79,70,229,0.3)}50%{opacity:0.85;text-shadow:0 0 60px rgba(99,102,241,0.8),0 0 120px rgba(99,102,241,0.4)}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="overlay">
+  <div class="logo">ERA</div>
+  <div class="sub">AI-Powered Product Experience Analysis</div>
+</div>
+<script>
+const c=document.getElementById('c'),x=c.getContext('2d');
+let w,h,cols,drops;
+const chars='ERAAIアイ产品体验01'.split('');
+
+function init(){
+  w=c.width=innerWidth;
+  h=c.height=innerHeight;
+  const s=14;
+  cols=Math.floor(w/s);
+  drops=Array(cols).fill(0).map(()=>Math.random()*-100|0);
+}
+
+function draw(){
+  x.fillStyle='rgba(10,10,10,0.06)';
+  x.fillRect(0,0,w,h);
+  x.font='14px Courier New';
+  for(let i=0;i<cols;i++){
+    const ch=chars[Math.random()*chars.length|0];
+    const brightness=Math.random();
+    if(brightness>0.95){
+      x.fillStyle='rgba(99,102,241,0.9)';
+    }else{
+      x.fillStyle=`rgba(79,70,229,${0.08+brightness*0.18})`;
+    }
+    x.fillText(ch,i*14,drops[i]*14);
+    if(drops[i]*14>h&&Math.random()>0.975)drops[i]=0;
+    drops[i]++;
+  }
+  requestAnimationFrame(draw);
+}
+
+init();
+draw();
+addEventListener('resize',init);
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/routers/webhook.py
+# hypothesis_version: 6.141.1
+
+[400, 401, '/api/webhook', '/trigger', 'X-Webhook-Token', 'accepted', 'message', 'new_records', 'status', 'success', 'webhook']

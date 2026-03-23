@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_pass: str = ""
     from_email: str = ""
+    from_name: str = "ERA 产品体验评估"  # 发件人显示名称
     email_cc: str = ""  # 抄送邮箱，多个用逗号分隔
 
     # AI Model API Keys
@@ -33,6 +34,9 @@ class Settings(BaseSettings):
 
     # Webhook Security
     webhook_token: str = ""  # Token for Feishu automation webhook verification
+
+    # Application
+    app_base_url: str = ""  # Base URL for report viewer links, e.g. https://your-domain.com
 
     # Admin Panel
     admin_username: str = "admin"

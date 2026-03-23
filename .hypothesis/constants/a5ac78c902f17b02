@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/routers/health.py
+# hypothesis_version: 6.141.1
+
+['/', '/admin', '/docs', '/health', 'ERA Assistant', 'admin', 'docs', 'healthy', 'message', 'service', 'status']

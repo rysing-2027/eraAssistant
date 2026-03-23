@@ -29,7 +29,8 @@ class EmailService:
         smtp_port: int,
         smtp_user: str,
         smtp_pass: str,
-        from_email: str
+        from_email: str,
+        from_name: str = None
     ):
         """Initialize Email service with SMTP credentials.
 
@@ -39,12 +40,14 @@ class EmailService:
             smtp_user: SMTP username (usually email address)
             smtp_pass: SMTP password or app password
             from_email: Sender email address
+            from_name: Sender display name (optional)
         """
         self.smtp_host = smtp_host
         self.smtp_port = smtp_port
         self.smtp_user = smtp_user
         self.smtp_pass = smtp_pass
         self.from_email = from_email
+        self.from_name = from_name
 
     def send_email(
         self,
@@ -69,7 +72,11 @@ class EmailService:
         try:
             # Create message
             msg = MIMEMultipart("alternative")
-            msg["From"] = self.from_email
+            # Format sender with display name if provided
+            if self.from_name:
+                msg["From"] = f"{self.from_name} <{self.from_email}>"
+            else:
+                msg["From"] = self.from_email
             msg["To"] = to_email
             msg["Subject"] = subject
 
@@ -114,7 +121,8 @@ class EmailService:
         employee_name: str,
         email_content: str,
         doc_link: str = None,
-        cc: str = None
+        cc: str = None,
+        view_token: str = None
     ) -> EmailResult:
         """Send evaluation result email to employee.
 
@@ -124,6 +132,7 @@ class EmailService:
             email_content: Generated email content from AI (Markdown)
             doc_link: Optional Feishu document link to include
             cc: Carbon copy recipients, comma-separated
+            view_token: Optional view token for report viewer link
 
         Returns:
             EmailResult with success status
@@ -135,6 +144,21 @@ class EmailService:
             email_content,
             extensions=["tables", "fenced_code"]
         )
+
+        # Build report viewer link if view_token provided
+        report_link_html = ""
+        if view_token:
+            from config.settings import get_settings
+            settings = get_settings()
+            base_url = settings.app_base_url.rstrip("/")
+            if base_url and not base_url.startswith(("http://", "https://")):
+                base_url = f"https://{base_url}"
+            report_url = f"{base_url}/report/{view_token}"
+            report_link_html = f"""
+            <div style="margin-bottom: 24px; padding: 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; text-align: center;">
+                <a href="{report_url}" style="color: #fff; text-decoration: none; font-size: 16px; font-weight: 600;">📊 点击查看完整分析报告</a>
+            </div>
+            """
 
         # Add document link section if provided
         doc_link_html = ""
@@ -186,8 +210,12 @@ class EmailService:
             </style>
         </head>
         <body>
+            {report_link_html}
             {html_content}
             {doc_link_html}
+            <div style="margin-top: 30px; padding-top: 15px; border-top: 1px solid #eee; color: #999; font-size: 12px;">
+                评估由多个AI大模型基于评估规则产生，供参考。
+            </div>
         </body>
         </html>
         """

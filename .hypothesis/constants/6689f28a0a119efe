@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/services/email_service.py
+# hypothesis_version: 6.141.1
+
+[',', 'Cc', 'From', 'Subject', 'To', 'alternative', 'fenced_code', 'html', 'plain', 'tables', 'utf-8']

@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/main.py
+# hypothesis_version: 6.141.1
+
+[8000, '/assets', '/email-templates', '/evaluation-criteria', '/login', '/product-knowledge', '/records', '/static', '0.0.0.0', '0.1.0', 'ERA Assistant', 'NO_PROXY', '__main__', 'admin', 'admin-assets', 'admin-not-built.html', 'assets', 'dist', 'index.html', 'main:app', 'new_records', 'recovered', 'static', 'success', 'templates', 'total']

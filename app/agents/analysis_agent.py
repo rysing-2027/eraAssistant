@@ -13,9 +13,10 @@ from datetime import datetime
 import json
 
 from langchain_openai import ChatOpenAI
-from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
+
+import re
 
 from app.models.product_knowledge import ProductKnowledge
 from app.models.evaluation_criteria import EvaluationCriteria
@@ -33,29 +34,145 @@ if _settings.langsmith_api_key:
     os.environ["LANGSMITH_PROJECT"] = _settings.langsmith_project
 
 
+def _extract_json_str(raw: str) -> str:
+    """Extract JSON string from LLM response, handling markdown blocks, thinking tags, etc."""
+    text = raw.strip()
+
+    # Remove <think>...</think> blocks (DeepSeek/GLM thinking mode)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+    # Extract from ```json ... ``` block
+    m = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+
+    # Extract from ``` ... ``` block
+    m = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate.startswith('{'):
+            return candidate
+
+    # If text starts with {, find the matching }
+    if text.lstrip().startswith('{'):
+        return text.lstrip()
+
+    return text
+
+
+def _try_parse_json(raw: str) -> dict:
+    """Try to parse JSON with progressive repair strategies."""
+    text = _extract_json_str(raw)
+
+    # 1. Direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Remove control characters (except newline/tab)
+    cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Remove trailing commas before } or ]
+    fixed = re.sub(r',\s*([}\]])', r'\1', cleaned)
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # 4. Try to extract first complete top-level JSON object via brace matching
+    depth = 0
+    start = None
+    in_string = False
+    escape = False
+    for i, ch in enumerate(fixed):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            if start is None:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    return json.loads(fixed[start:i+1])
+                except json.JSONDecodeError:
+                    # Try with trailing comma fix on this substring
+                    sub = re.sub(r',\s*([}\]])', r'\1', fixed[start:i+1])
+                    try:
+                        return json.loads(sub)
+                    except json.JSONDecodeError:
+                        pass
+                    start = None
+                    depth = 0
+
+    # 5. Give up
+    raise json.JSONDecodeError("Failed to parse after repair attempts", raw[:200], 0)
+
+
 # ============================================================================
-# Rate Limiting for ChatTongyi (通义千问限制 5次/秒)
+# 统一限流器 — 每个 API provider 一个实例
 # ============================================================================
 
-_tongyi_semaphore = asyncio.Semaphore(3)  # 同时最多 3 个请求
-_tongyi_last_call_time = 0
-_tongyi_lock = asyncio.Lock()
+class RateLimiter:
+    """通用 API 限流器：Semaphore 控制并发 + 最小间隔控制 QPS。"""
+
+    def __init__(self, name: str, max_concurrent: int = 3, min_interval: float = 0.2):
+        self.name = name
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._min_interval = min_interval
+        self._last_call_time = 0.0
+        self._lock = asyncio.Lock()
+
+    async def call(self, llm, messages) -> Any:
+        async with self._semaphore:
+            async with self._lock:
+                now = asyncio.get_event_loop().time()
+                elapsed = now - self._last_call_time
+                if elapsed < self._min_interval:
+                    await asyncio.sleep(self._min_interval - elapsed)
+                self._last_call_time = asyncio.get_event_loop().time()
+
+            return await llm.ainvoke(messages)
 
 
-async def call_tongyi_with_rate_limit(llm, messages) -> Any:
-    """调用 ChatTongyi 并遵守限流规则（5次/秒）。"""
-    global _tongyi_last_call_time
+# 各 provider 限流配置
+# DashScope (通义千问 + Kimi K2): 5 QPS → max_concurrent=3, interval=0.2s
+_dashscope_limiter = RateLimiter("dashscope", max_concurrent=3, min_interval=0.2)
+# 火山方舟 (Doubao): 保守限制 → max_concurrent=3, interval=0.3s
+_ark_limiter = RateLimiter("ark", max_concurrent=3, min_interval=0.3)
+# DeepSeek: 保守限制 → max_concurrent=3, interval=0.3s
+_deepseek_limiter = RateLimiter("deepseek", max_concurrent=3, min_interval=0.3)
 
-    async with _tongyi_semaphore:
-        async with _tongyi_lock:
-            # 确保距离上次调用至少 0.2 秒
-            now = asyncio.get_event_loop().time()
-            elapsed = now - _tongyi_last_call_time
-            if elapsed < 0.2:
-                await asyncio.sleep(0.2 - elapsed)
-            _tongyi_last_call_time = asyncio.get_event_loop().time()
+# provider 名称 → 限流器映射
+_LIMITERS: Dict[str, RateLimiter] = {
+    "dashscope": _dashscope_limiter,
+    "ark": _ark_limiter,
+    "deepseek": _deepseek_limiter,
+}
 
-        return await llm.ainvoke(messages)
+
+async def call_with_rate_limit(provider: str, llm, messages) -> Any:
+    """统一限流调用入口。"""
+    limiter = _LIMITERS.get(provider)
+    if limiter:
+        return await limiter.call(llm, messages)
+    # 未知 provider，直接调用
+    return await llm.ainvoke(messages)
 
 
 # ============================================================================
@@ -106,6 +223,11 @@ def get_judge_system_prompt(knowledge_content: str, evaluation_criteria: str) ->
 - 不关注：员工的报告写得够不够好、应该如何改进
 - **重要**：在评价和总结中，尽量引用用户的"原话"，这样更真实、更有说服力
 
+## 重要约束
+
+1. **严禁编造产品知识**：所有产品介绍、功能说明必须严格来源于"产品知识库"中的内容，不得凭空编造或臆测任何产品信息。
+2. **严禁做任何承诺或暗示改进计划**：绝对不要向用户承诺任何修复时间、功能上线计划、技术方案或解决方案。禁止使用"正在优化"、"后续版本会改进"、"已纳入规划"、"将在下个版本修复"等暗示产品团队有具体行动的表述。你的角色是"倾听者和记录者"，只需确认收到反馈、表示理解和重视、说明已记录并转达给产品团队即可。
+
 ## 输出要求
 
 请以JSON格式返回评估结果，格式如下：
@@ -148,6 +270,19 @@ def get_main_judge_system_prompt(evaluation_criteria: str, email_template: str) 
 - 不关注：员工的报告写得够不够好、应该如何改进
 - **重要**：在总结和邮件中，尽量引用用户的"原话"，这样更真实、更有说服力
 
+## 重要约束
+
+1. **严禁编造产品知识**：所有产品介绍、功能说明必须严格来源于评委提供的信息，不得凭空编造或臆测任何产品信息。
+2. **严禁做任何承诺或暗示改进计划**：绝对不要向用户承诺任何修复时间、功能上线计划、技术方案或解决方案。在邮件的"针对性反馈"部分：
+   - ❌ 禁止说"正在优化"、"后续版本会改进"、"已纳入规划"、"将在下个版本修复"、"我们正在研发"
+   - ❌ 禁止编造技术方案（如"端侧模型"、"重构配对流程"、"参考XX体验"）
+   - ❌ 禁止给出优先级判断（如"P0级问题"、"重点优化方向"）
+   - ❌ 禁止暗示时间节点（如"紧急版本"、"近期"）
+   - ✅ 只需：确认收到反馈 → 表示理解和重视 → 说明已记录并转达给产品团队
+   - ✅ 可用表述："感谢你指出这个问题，我们已如实记录并反馈给产品团队"、"这个反馈很有价值，已同步给相关团队"
+   你的角色是"倾听者和记录者"，不是"产品决策者"。
+3. **评分下限**：尽量不要给低于60分的总分。即使报告质量确实较差，最终总分也应给在60分左右，体现对员工参与的基本认可。
+
 ## 你的任务
 
 1. 审阅三位评委的评分结果，判断是否合理
@@ -177,6 +312,8 @@ def get_main_judge_system_prompt(evaluation_criteria: str, email_template: str) 
       "表达质量": {{"分数": 0, "满分": 10}},
       "态度与投入": {{"分数": 0, "满分": 10}}
     }},
+    "个性化开场白": "用1-2句话总结这位员工报告中最突出的贡献或发现，体现我们认真阅读了报告。例如：你在XX场景下发现的XX问题非常有价值，这个洞察直接帮助我们定位了一个关键的用户体验瓶颈。",
+    "针对性反馈": ["反馈1：针对报告中具体内容给出的个性化建议或回应", "反馈2：..."],
     "报告亮点": ["亮点1：具体的洞察或发现", "亮点2：..."],
     "产品痛点总结": ["痛点1：用户反馈的产品问题", "痛点2：..."],
     "期望功能总结": ["期望1：用户希望增加的功能", "期望2：..."]
@@ -186,6 +323,8 @@ def get_main_judge_system_prompt(evaluation_criteria: str, email_template: str) 
 }}
 
 注意：
+- "个性化开场白"：用1-2句话总结这位员工报告中最突出的贡献或发现，让员工感受到我们认真阅读了报告，要具体、真诚、有温度
+- "针对性反馈"：针对报告中的具体内容确认已收到并记录，如果知识库中有事实性信息可以澄清用户误解则补充说明，但绝不做任何承诺或暗示改进计划
 - "报告亮点"：挖掘报告中有价值的洞察和发现
 - "产品痛点总结"：总结用户反馈的产品问题和不足
 - "期望功能总结"：总结用户期望增加或改进的功能
@@ -289,41 +428,39 @@ async def call_judge(
     system_prompt: str,
     raw_text: str,
     employee_name: str,
-    judge_name: str
+    judge_name: str,
+    provider: str = "dashscope"
 ) -> Dict[str, Any]:
-    """Call a single judge LLM."""
+    """Call a single judge LLM with timeout protection and rate limiting."""
+    content = ""
     try:
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"## 员工姓名\n{employee_name}\n\n## 报告内容\n{raw_text}")
         ]
 
-        # ChatTongyi 需要限流
-        if "Qwen" in judge_name or "Tongyi" in judge_name:
-            response = await call_tongyi_with_rate_limit(llm, messages)
-        else:
-            response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            call_with_rate_limit(provider, llm, messages), timeout=300
+        )
 
         content = response.content
-
-        # Parse JSON response
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        result = json.loads(content.strip())
+        result = _try_parse_json(content)
         result["judge"] = judge_name
         result["success"] = True
-
         return result
 
+    except asyncio.TimeoutError:
+        return {
+            "judge": judge_name,
+            "success": False,
+            "error": "Timeout after 300s"
+        }
     except json.JSONDecodeError as e:
         return {
             "judge": judge_name,
             "success": False,
             "error": f"JSON parse error: {str(e)}",
-            "raw_response": content if 'content' in dir() else None
+            "raw_response": content[:500] if content else None
         }
     except Exception as e:
         return {
@@ -333,22 +470,40 @@ async def call_judge(
         }
 
 
-def create_tongyi_llm(settings) -> Any:
-    """创建 ChatTongyi LLM。"""
-    return ChatTongyi(
-        model="qwen3-max",
-        dashscope_api_key=settings.dashscope_api_key,
-        temperature=0.3
+def create_tongyi_llm(settings, json_mode: bool = False) -> Any:
+    """创建通义千问 LLM (使用 OpenAI 兼容接口)。"""
+    kwargs = dict(
+        model="qwen3.5-plus",
+        api_key=settings.dashscope_api_key,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        temperature=0.3,
     )
+    if json_mode:
+        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    return ChatOpenAI(**kwargs)
+
+
+def create_glm_llm(settings, enable_thinking: bool = True, json_mode: bool = False) -> Any:
+    """创建 Kimi K2 LLM (使用阿里云百炼 OpenAI 兼容接口)。"""
+    kwargs = dict(
+        model="kimi-k2-thinking",
+        api_key=settings.dashscope_api_key,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        temperature=0.3,
+    )
+    # kimi-k2-thinking supports json_mode even in thinking mode
+    if json_mode:
+        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    return ChatOpenAI(**kwargs)
 
 
 async def analyze_parallel(state: AnalysisState) -> dict:
     """Call 3 judges in parallel."""
     settings = get_settings()
 
-    # Initialize LLMs
+    # Initialize LLMs — all with json_mode for guaranteed valid JSON output
     try:
-        judge_1_llm = create_tongyi_llm(settings)
+        judge_1_llm = create_tongyi_llm(settings, json_mode=True)
     except Exception:
         judge_1_llm = None
 
@@ -357,7 +512,7 @@ async def analyze_parallel(state: AnalysisState) -> dict:
             model="doubao-seed-2-0-lite-260215",
             api_key=settings.ark_api_key,
             base_url="https://ark.cn-beijing.volces.com/api/v3",
-            temperature=0.3
+            temperature=0.3,
         )
     except Exception:
         judge_2_llm = None
@@ -367,7 +522,8 @@ async def analyze_parallel(state: AnalysisState) -> dict:
             model="deepseek-reasoner",
             api_key=settings.deepseek_api_key,
             base_url="https://api.deepseek.com/v1",
-            temperature=0.3
+            temperature=0.3,
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
     except Exception:
         judge_3_llm = None
@@ -378,14 +534,14 @@ async def analyze_parallel(state: AnalysisState) -> dict:
         state.get("evaluation_criteria", "")
     )
 
-    # Call judges in parallel
+    # Call judges in parallel (each with its own rate limiter)
     tasks = []
     if judge_1_llm:
-        tasks.append(call_judge(judge_1_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 1 (Qwen)"))
+        tasks.append(call_judge(judge_1_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 1 (Qwen)", provider="dashscope"))
     if judge_2_llm:
-        tasks.append(call_judge(judge_2_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 2 (Doubao)"))
+        tasks.append(call_judge(judge_2_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 2 (Doubao)", provider="ark"))
     if judge_3_llm:
-        tasks.append(call_judge(judge_3_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 3 (DeepSeek)"))
+        tasks.append(call_judge(judge_3_llm, system_prompt, state["raw_text"], state["employee_name"], "Judge 3 (DeepSeek)", provider="deepseek"))
 
     if not tasks:
         return {"error": "No LLM configured for any judge"}
@@ -406,10 +562,8 @@ async def analyze_parallel(state: AnalysisState) -> dict:
 
 
 async def main_judge(state: AnalysisState) -> dict:
-    """Main judge consolidates results and generates final output."""
+    """Main judge consolidates results and generates final output. Retries once on failure."""
     settings = get_settings()
-
-    main_llm = create_tongyi_llm(settings)
 
     # Gather judge results
     judge_results = []
@@ -425,7 +579,6 @@ async def main_judge(state: AnalysisState) -> dict:
 
     judge_summary = json.dumps(judge_results, ensure_ascii=False, indent=2)
 
-    # Get system prompt with evaluation criteria and email template
     system_prompt = get_main_judge_system_prompt(
         evaluation_criteria=state.get("evaluation_criteria", ""),
         email_template=state.get("email_template", "")
@@ -438,33 +591,35 @@ async def main_judge(state: AnalysisState) -> dict:
 
 请生成最终评估结果和邮件内容。"""
 
-    try:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_message)
-        ]
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_message)
+    ]
 
-        # Main Judge 也用 ChatTongyi，需要限流
-        response = await call_tongyi_with_rate_limit(main_llm, messages)
-        content = response.content
+    # Try up to 2 times: kimi-k2-thinking supports json_mode in thinking mode
+    for attempt in range(1, 3):
+        try:
+            main_llm = create_glm_llm(settings, enable_thinking=True, json_mode=True)
+            response = await asyncio.wait_for(
+                call_with_rate_limit("dashscope", main_llm, messages), timeout=300
+            )
+            content = response.content
+            result = _try_parse_json(content)
 
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
+            return {
+                "final_score": result.get("final_score"),
+                "email_content": result.get("email_content"),
+                "error": None
+            }
 
-        result = json.loads(content.strip())
+        except asyncio.TimeoutError:
+            last_error = f"Main judge timeout after 300s (attempt {attempt})"
+        except json.JSONDecodeError as e:
+            last_error = f"Main judge JSON parse error (attempt {attempt}): {str(e)}"
+        except Exception as e:
+            last_error = f"Main judge error (attempt {attempt}): {str(e)}"
 
-        return {
-            "final_score": result.get("final_score"),
-            "email_content": result.get("email_content"),
-            "error": None
-        }
-
-    except json.JSONDecodeError as e:
-        return {"error": f"Main judge JSON parse error: {str(e)}"}
-    except Exception as e:
-        return {"error": f"Main judge error: {str(e)}"}
+    return {"error": last_error}
 
 
 def save_results(state: AnalysisState) -> dict:

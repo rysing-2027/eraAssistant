@@ -1,0 +1,4 @@
+# file: /Users/ricying/Desktop/TimeKettle/eraAssistant/app/routers/test.py
+# hypothesis_version: 6.141.1
+
+[400, 500, '/analysis', '/continue-workflow', '/feishu', '/pipeline', '/retry', '/test', '/workflow', 'Submitted', 'all_keys', 'analysis', 'analysis_success', 'employee_name', 'error', 'failed', 'fields', 'final_score', 'judge_1', 'judge_1_result', 'judge_2', 'judge_2_result', 'judge_3', 'judge_3_result', 'judge_results', 'message', 'pipeline', 'processed', 'record_count', 'record_id', 'record_ids', 'sample_records', 'status', 'success', 'test', 'total', 'total_records', '附件']
